@@ -1,0 +1,23 @@
+version: '3.8'  # Especifica la versión de Docker Compose
+
+services:
+  web:
+    build: .  # Construye la imagen desde el Dockerfile en el directorio actual
+    ports:
+      - "5000:5000"  # Mapea el puerto 5000 del contenedor al puerto 5000 del host
+    environment:
+      - FLASK_APP=app.py  # Establece la variable de entorno FLASK_APP
+      - FLASK_RUN_HOST=0.0.0.0  # Permite que Flask escuche en todas las interfaces
+      - GITHUB_CLIENT_ID=Ov23lijiz4UwwYWeED8A  # Configura el Client ID de GitHub
+      - GITHUB_CLIENT_SECRET=26dedd471513cf44a7d1f51b08084c2f67237740  # Configura el Client Secret de GitHub
+    volumes:
+      - .:/code  # Monta el directorio actual en /code dentro del contenedor
+    command: ["flask", "run", "--host=0.0.0.0"]  # Comando para iniciar la aplicación Flask
+
+  ngrok:
+    image: wernight/ngrok  # Imagen oficial de ngrok
+    environment:
+      - NGROK_AUTH=2om14fh11ESZv35VscOU779eqjK_66nYJo2uhkDPXLu45pZwa
+      - NGROK_PORT=web:5000  # El puerto expuesto por tu aplicación Flask dentro del contenedor
+    ports:
+      - "4040:4040"  # Exponer el puerto del panel de control de ngrok (opcional)
