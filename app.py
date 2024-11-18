@@ -1,12 +1,20 @@
 from flask import Flask, request, jsonify, redirect, session, url_for
-from flask_sqlalchemy import SQLAlchemy
 from requests_oauthlib import OAuth2Session
 from datadog import initialize, statsd
+from config import Config
+from models import db
+from models.user import User
+from models.role import Role
+from routes.user_routes import user_bp
+from routes.role_routes import role_bp
 from uuid import uuid4
-import uuid
-import os
+import logging
 
 app = Flask(__name__)
+app.config.from_object(Config)
+
+# Inicializar DB
+db.init_app(app)
 
 # Inicializar integración Datadog
 options = {
@@ -16,33 +24,13 @@ options = {
 
 initialize(**options)
 
-# Configuración de la base de datos
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///roles.db'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.secret_key = "S3cR3tK3yT35t4p1"
-
-# Inicializar SQLAlchemy
-db = SQLAlchemy(app)
-
-# Modelo para los roles
-class Rol(db.Model):
-    id = db.Column(db.String(36), primary_key=True)
-    name = db.Column(db.String(50), nullable=False)
-    description = db.Column(db.String(200), nullable=False)
-    roleType = db.Column(db.String(50), nullable=False)
-    scope = db.Column(db.String(50), nullable=False)
-
-# Modelo para los usuarios
-class User(db.Model):
-    id = db.Column(db.String(36), primary_key=True)
-    name = db.Column(db.String(50), nullable=False)
-    userType = db.Column(db.String(50), nullable=False)
-    status = db.Column(db.String(50), nullable=False)
-    roles = db.Column(db.String(200), nullable=True)  # Almacena roles como un string
-
-# Crear las tablas en la base de datos
+# Crear las tablas en la base de datos sólo si no existen
 with app.app_context():
     db.create_all()
+
+# Registrar los Blueprints para las rutas de usuario y rol
+app.register_blueprint(user_bp)
+app.register_blueprint(role_bp)
 
 # Configuración de OAuth (GitHub)
 GITHUB_CLIENT_ID = "Ov23lijiz4UwwYWeED8A"
@@ -93,7 +81,7 @@ def callback():
     if not user:
         # Si no existe, crear un nuevo usuario
         new_user = User(
-            id=str(uuid.uuid4()),  # Genera UUID
+            id=str(uuid4()),  # Genera UUID
             name=user_name,
             userType="Federated",
             status="Active",
@@ -107,207 +95,10 @@ def callback():
 
     return jsonify({"message": "Inicio de sesion exitoso", "user_id": user_id})
 
-# Endpoint para crear un rol
-@app.route('/roles', methods=['POST'])
-def create_rol():
-    data = request.get_json()
-    
-    # Verificar campos requeridos
-    if not all(key in data for key in ("name", "description", "roleType", "scope")):
-        statsd.increment('roles.create.failure')
-        return jsonify({"error": "Faltan campos requeridos"}), 400
-    
-    new_rol = Rol(
-        id=str(uuid4()),
-        name=data["name"],
-        description=data["description"],
-        roleType=data["roleType"],
-        scope=data["scope"]
-    )
-    
-    db.session.add(new_rol)  # Agregar nuevo rol a la sesión
-    db.session.commit()       # Guardar rol en la base de datos
-    statsd.increment('roles.create.success')
-    
-    return jsonify({"id": new_rol.id, "name": new_rol.name}), 201
-
-# Endpoint para modificar un rol
-@app.route('/roles/<string:id>', methods=['PUT'])
-def modify_rol(id):
-    rol = Rol.query.get(id)
-    
-    if rol is None:
-        statsd.increment('roles.modify.failure')
-        return jsonify({"error": "Rol no encontrado"}), 404
-    
-    data = request.get_json()
-    
-    # Actualizar los campos del rol
-    if 'name' in data:
-        rol.name = data['name']
-    if 'description' in data:
-        rol.description = data['description']
-    if 'roleType' in data:
-        rol.roleType = data['roleType']
-    if 'scope' in data:
-        rol.scope = data['scope']
-    
-    db.session.commit()  # Guardar cambios en la base de datos
-    
-    statsd.increment('roles.modify.success')
-    return jsonify({"id": rol.id, "name": rol.name}), 200
-
-# Endpoint para borrar un rol
-@app.route('/roles/<string:id>', methods=['DELETE'])
-def delete_rol(id):
-    rol = Rol.query.get(id)  # Buscar el rol por ID
-    
-    if rol is None:
-        statsd.increment('roles.delete.failure')
-        return jsonify({"error": "Rol no encontrado"}), 404
-    
-    db.session.delete(rol)   # Eliminar el rol de la sesión
-    db.session.commit()       # Guardar los cambios en la base de datos
-    
-    statsd.increment('roles.delete.success')
-    return jsonify({"message": "Rol eliminado exitosamente"}), 200
-
-# Endpoint para obtener todos los roles
-@app.route('/roles', methods=['GET'])
-def get_roles():
-    roles = Rol.query.all()  # Obtener todos los roles de la base de datos
-    result = []
-    
-    for rol in roles:
-        result.append({
-            "id": rol.id,
-            "name": rol.name,
-            "description": rol.description,
-            "roleType": rol.roleType,
-            "scope": rol.scope
-        })
-    
-    return jsonify(result), 200  # Retornar lista en formato JSON
-
-# Endpoint para crear un usuario
-@app.route('/users', methods=['POST'])
-def create_user():
-    data = request.get_json()
-    
-    # Verificar campos requeridos
-    if not all(key in data for key in ("name", "userType", "status")):
-        return jsonify({"error": "Faltan campos requeridos"}), 400
-    
-    user_id = str(uuid.uuid4())  # Genera un UUID aleatorio
-    
-    new_user = User(
-        id=user_id,
-        name=data["name"],
-        userType=data["userType"],
-        status=data["status"],
-        roles=""  # Inicialmente sin roles asignados
-    )
-    
-    try:
-        db.session.add(new_user)  # Agregar nuevo usuario a la sesión
-        db.session.commit()        # Guardar usuario en la base de datos
-    except Exception as e:
-        db.session.rollback()      # Revertir cambios si ocurre un error
-        return jsonify({"error": "Error al crear el usuario: " + str(e)}), 500
-    
-    return jsonify({"id": new_user.id, "name": new_user.name}), 201
-
-# Endpoint para eliminar un usuario
-@app.route('/users/<string:id>', methods=['DELETE'])
-def delete_user(id):
-    user = User.query.get(id)  # Buscar el usuario por ID
-    
-    if user is None:
-        return jsonify({"error": "Usuario no encontrado"}), 404
-    
-    db.session.delete(user)     # Eliminar el usuario de la sesión
-    db.session.commit()          # Guardar cambios en la base de datos
-    
-    return jsonify({"message": "Usuario eliminado exitosamente"}), 200
-
-# Endpoint para obtener todos los usuarios
-@app.route('/users', methods=['GET'])
-def get_users():
-    users = User.query.all()  # Obtener todos los usuarios de la base de datos
-    result = []
-    
-    for user in users:
-        result.append({
-            "id": user.id,
-            "name": user.name,
-            "userType": user.userType,
-            "status": user.status,
-            "roles": user.roles  # Incluir roles como cadena
-        })
-    
-    return jsonify(result), 200  # Retornar lista en formato JSON
-
-# Endpoint para asignar roles a un usuario
-@app.route('/users/assignRole', methods=['POST'])
-def assignRole():
-    data = request.get_json()
-    
-    # Verificar que se hayan proporcionado el ID del usuario y el rol
-    if not all(key in data for key in ("user_id", "role")):
-        return jsonify({"error": "Faltan campos requeridos"}), 400
-    
-    user = User.query.get(data["user_id"])
-    
-    if user is None:
-        return jsonify({"error": "Usuario no encontrado"}), 404
-    
-    # Verificar si el rol existe
-    role = Rol.query.filter_by(name=data['role']).first()
-    
-    if role is None:
-        return jsonify({"error": "Este rol no existe"}), 404
-    
-    current_roles = user.roles.split(",") if user.roles else []
-    
-    if data['role'] not in current_roles:
-        current_roles.append(data['role'])
-        user.roles = ",".join(current_roles)  
-        
-        db.session.commit()  
-        
-        return jsonify({"message": f"Rol '{data['role']}' asignado a {user.name}."}), 200
-    else:
-        return jsonify({"message": "El rol ya está asignado a este usuario."}), 200
-
-# Endpoint para desasignar roles de un usuario
-@app.route('/users/removeRole', methods=['POST'])
-def removeRole():
-    data = request.get_json()
-    
-    # Verificar que se hayan proporcionado el ID del usuario y el rol
-    if not all(key in data for key in ("user_id", "role")):
-        return jsonify({"error": "Faltan campos requeridos"}), 400
-    
-    user = User.query.get(data["user_id"])
-    
-    if user is None:
-        return jsonify({"error": "Usuario no encontrado"}), 404
-    
-    current_roles = user.roles.split(",") if user.roles else []
-    
-    if data['role'] in current_roles:
-        current_roles.remove(data['role'])
-        user.roles = ",".join(current_roles)  
-        
-        db.session.commit()  
-        
-        return jsonify({"message": f"Rol '{data['role']}' desasignado de {user.name}."}), 200
-    else:
-        return jsonify({"message": "El rol no está asignado a este usuario."}), 200
-
 @app.errorhandler(Exception)
 def handle_exception(e):
     # Registrar el error usando logging
+    logging.error(f"Error occurred: {str(e)}")
     return jsonify({"error": str(e)}), 500
 
 # Métricas Datadog
