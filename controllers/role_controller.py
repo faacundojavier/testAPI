@@ -13,20 +13,31 @@ def create_rol():
     
     # Verificar campos requeridos
     if not all(key in data for key in ("name", "description", "roleType", "scope")):
-        statsd.increment('roles.create.failure')
+        statsd.increment('api.role.create.failure',
+                        tags=['service:my-api-service',
+                              'env:development',
+                              'error_type:validation'])
         return jsonify({"error": "Faltan campos requeridos"}), 400
     
+    existing_role = Role.query.filter_by(name=data["name"]).first()
+    if existing_role:
+        return jsonify({"error": "Ya existe un rol con ese nombre."}), 409
+
     new_role = Role(
         id=str(uuid4()),
         name=data["name"],
         description=data["description"],
         roleType=data["roleType"],
-        scope=data["scope"]
+        scope=data["scope"],
+        permissions=data["permissions"]
     )
     
     db.session.add(new_role)  # Agregar nuevo rol a la sesión
     db.session.commit()       # Guardar rol en la base de datos
-    statsd.increment('roles.create.success')
+    statsd.increment('api.role.create.success',
+                        tags=['service:my-api-service',
+                              'env:development',
+                              'role_type:{}'.format(data["roleType"])])
     
     return jsonify({"id": new_role.id, "name": new_role.name}), 201
 
@@ -41,6 +52,10 @@ def modify_rol(id):
     
     data = request.get_json()
     
+    existing_role = Role.query.filter_by(name=data["name"]).first()
+    if existing_role:
+        return jsonify({"error": "Ya existe un rol con ese nombre."}), 409
+
     # Actualizar los campos del rol
     updated = False
     if 'name' in data:
@@ -55,7 +70,10 @@ def modify_rol(id):
     if 'scope' in data:
         role.scope = data['scope']
         updated = True
-    
+    if 'permissions' in data:
+        role.permissions = data['permissions']
+        updated = True
+        
     if updated:
         try:
             db.session.commit()  # Guardar cambios en la base de datos
@@ -93,7 +111,8 @@ def get_roles():
             "name": role.name,
             "description": role.description,
             "roleType": role.roleType,
-            "scope": role.scope
+            "scope": role.scope,
+            "permissions": role.permissions
         })
     
     return jsonify(result), 200  # Retornar lista en formato JSON

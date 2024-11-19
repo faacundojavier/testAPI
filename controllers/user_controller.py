@@ -4,34 +4,48 @@ from models.role import Role
 from models import db
 from uuid import uuid4
 from datadog import statsd
+from auth.auth_middleware import requires_auth
+import json
 
 user_bp = Blueprint('user', __name__)
 
 # Endpoint para crear un usuario
 @user_bp.route('/users', methods=['POST'])
+@requires_auth
 def create_user():
     data = request.get_json()
     
     # Verificar campos requeridos
-    if not all(key in data for key in ("name", "userType", "status")):
+    if not all(key in data for key in ("name", "email", "userType", "status")):
         return jsonify({"error": "Faltan campos requeridos"}), 400
     
-    new_user = User(
-        id=str(uuid4()),
-        name=data["name"],
-        userType=data["userType"],
-        status=data["status"],
-        roles=""  # Inicialmente sin roles asignados
-    )
-    
+    existing_user = User.query.filter_by(email=data["email"]).first()
+    if existing_user:
+        return jsonify({"error": "El correo electrónico ya está en uso."}), 409
+
     try:
-        db.session.add(new_user)  # Agregar nuevo usuario a la sesión
-        db.session.commit()        # Guardar usuario en la base de datos
+        with db.session.begin_nested():
+            new_user = User(
+                id=str(uuid4()),
+                name=data["name"],
+                email=data["email"],
+                userType=data["userType"],
+                status=data["status"],
+                roles=json.dumps([])
+            )
+            db.session.add(new_user)
+        
+        db.session.commit()
+        
+        return jsonify({
+            "id": new_user.id,
+            "name": new_user.name,
+            "email": new_user.email
+        }), 201
+        
     except Exception as e:
-        db.session.rollback()      # Revertir cambios si ocurre un error
-        return jsonify({"error": "Error al crear el usuario: " + str(e)}), 500
-    
-    return jsonify({"id": new_user.id, "name": new_user.name}), 201
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
 
 # Endpoint para eliminar un usuario
 @user_bp.route('/users/<string:id>', methods=['DELETE'])
@@ -56,6 +70,7 @@ def get_users():
         result.append({
             "id": user.id,
             "name": user.name,
+            "email": user.email,
             "userType": user.userType,
             "status": user.status,
             "roles": user.roles  # Incluir roles como cadena
@@ -69,10 +84,10 @@ def assignRole():
     data = request.get_json()
     
     # Verificar que se hayan proporcionado el ID del usuario y el rol
-    if not all(key in data for key in ("user_id", "role")):
+    if not all(key in data for key in ("email", "role")):
         return jsonify({"error": "Faltan campos requeridos"}), 400
     
-    user = User.query.get(data["user_id"])
+    user = User.query.get(data["email"])
     
     if user is None:
         return jsonify({"error": "Usuario no encontrado"}), 404
@@ -101,10 +116,10 @@ def removeRole():
     data = request.get_json()
     
     # Verificar que se hayan proporcionado el ID del usuario y el rol
-    if not all(key in data for key in ("user_id", "role")):
+    if not all(key in data for key in ("email", "role")):
         return jsonify({"error": "Faltan campos requeridos"}), 400
     
-    user = User.query.get(data["user_id"])
+    user = User.query.get(data["email"])
     
     if user is None:
         return jsonify({"error": "Usuario no encontrado"}), 404

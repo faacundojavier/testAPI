@@ -1,104 +1,154 @@
 from flask import Flask, request, jsonify, redirect, session, url_for
 from requests_oauthlib import OAuth2Session
+from authlib.integrations.flask_client import OAuth
 from datadog import initialize, statsd
 from config import Config
 from models import db
 from models.user import User
 from models.role import Role
-from routes.user_routes import user_bp
-from routes.role_routes import role_bp
+from controllers.user_controller import user_bp
+from controllers.role_controller import role_bp
 from uuid import uuid4
+import json
+import jwt
+import requests
 import logging
+import os
 
 app = Flask(__name__)
+app.secret_key = Config.SECRET_KEY
 app.config.from_object(Config)
-
 # Inicializar DB
 db.init_app(app)
+
+def create_admin_user(app):
+    with app.app_context():
+        try:
+            # Crear rol de administrador si no existe
+            admin_role = Role.query.filter_by(name=Config.ADMIN_ROLE).first()
+            if not admin_role:
+                admin_role = Role(
+                    id=str(uuid4()),
+                    name=Config.ADMIN_ROLE,
+                    description="Administrator role with full access",
+                    roleType="admin",
+                    scope="global",
+                    permissions=json.dumps(['all'])
+                )
+                db.session.add(admin_role)
+                db.session.flush()  # Asegurar que el rol se cree antes de crear el usuario
+
+            # Crear usuario administrador si no existe
+            admin_user = User.query.filter_by(email=Config.ADMIN_EMAIL).first()
+            if not admin_user:
+                admin_user = User(
+                    id=str(uuid4()),
+                    name="Admin",
+                    email=Config.ADMIN_EMAIL,
+                    userType="Admin",
+                    status="Active",
+                    roles=json.dumps([Config.ADMIN_ROLE])
+                )
+                db.session.add(admin_user)
+            
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error creating admin user: {str(e)}")
+            raise
+
+# Crear las tablas sólo si no existen
+with app.app_context():
+    db.create_all()
+    create_admin_user(app)
 
 # Inicializar integración Datadog
 options = {
     'api_key': '4ca9b95447eb0d7b3f9ae8a271816db9',
-    'app_key': 'fc7802f55f214723b0f11b138463030788cfcd68'
+    'app_key': 'fc7802f55f214723b0f11b138463030788cfcd68',
+    'host': os.getenv('HOSTNAME', 'my-api-service'),
+    'statsd_host': 'dd-agent',
+    'statsd_port': 8125
 }
 
 initialize(**options)
-
-# Crear las tablas en la base de datos sólo si no existen
-with app.app_context():
-    db.create_all()
 
 # Registrar los Blueprints para las rutas de usuario y rol
 app.register_blueprint(user_bp)
 app.register_blueprint(role_bp)
 
-# Configuración de OAuth (GitHub)
-GITHUB_CLIENT_ID = "Ov23lijiz4UwwYWeED8A"
-GITHUB_CLIENT_SECRET = "26dedd471513cf44a7d1f51b08084c2f67237740"
-GITHUB_OAUTH_URL = "https://github.com/login/oauth"
-GITHUB_API_URL = "https://api.github.com/user"
+# Configuración de OAuth (Auth0)
+oauth = OAuth(app)
+auth0 = oauth.register(
+    'auth0',
+    client_id=Config.AUTH0_CLIENT_ID,
+    client_secret=Config.AUTH0_CLIENT_SECRET,
+    api_base_url=f'https://{Config.AUTH0_DOMAIN}',
+    access_token_url=f'https://{Config.AUTH0_DOMAIN}/oauth/token',
+    authorize_url=f'https://{Config.AUTH0_DOMAIN}/authorize',
+    client_kwargs={
+        'scope': 'openid profile email'
+    },
+    server_metadata_url=f'https://{Config.AUTH0_DOMAIN}/.well-known/openid-configuration'
+)
 
 # Ruta raíz
 @app.route('/')
 def home():
-    return "Probando API REST."
+    return jsonify({
+        "message": "Probando API REST.",
+        "login_url": "/login"
+    })
 
 @app.route('/login')
 def login():
-    github = OAuth2Session(GITHUB_CLIENT_ID)
-    authorization_url, state = github.authorization_url(f"{GITHUB_OAUTH_URL}/authorize")
-    session['oauth_state'] = state
-    print("OAuth State:", session['oauth_state'])  # Mensaje de depuración
-    return redirect(authorization_url)
-@app.route('/callback')
-def callback():
-    if 'oauth_state' not in session:
-        return jsonify({"error": "Estado OAuth no encontrado en la sesión."}), 400
-
-    github = OAuth2Session(GITHUB_CLIENT_ID, state=session['oauth_state'])
-
     try:
-        token = github.fetch_token(
-            f"{GITHUB_OAUTH_URL}/access_token",
-            client_secret=GITHUB_CLIENT_SECRET,
-            authorization_response = request.url.replace("http://", "https://") # Forzar el uso de HTTPS
+        return auth0.authorize_redirect(
+            redirect_uri=Config.AUTH0_CALLBACK_URL,
+            audience=Config.AUTH0_AUDIENCE
         )
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/callback')
+def callback():
+    try:
+        token = auth0.authorize_access_token()
+        user_info = auth0.get('userinfo').json()
+        
+        email = user_info.get('email')
+        name = user_info.get('name') or email
+        
+        with db.session.begin_nested():  # Crear un savepoint
+            user = User.query.filter_by(email=email).first()
+            if not user:
+                new_user = User(
+                    id=str(uuid4()),
+                    name=name,
+                    email=email,
+                    userType="Federated",
+                    status="Active",
+                    roles=json.dumps([])
+                )
+                db.session.add(new_user)
+        
+        db.session.commit()  # Commit final
+            
+        return jsonify({
+            "message": "Login successful",
+            "access_token": token['access_token']
+        })
+        
+    except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 400
-
-    # Tomando user info
-    user_info = github.get(GITHUB_API_URL).json()
-
-    # Verificar si hay un error en la respuesta
-    if 'message' in user_info and user_info['message'] == 'Requires authentication':
-        return jsonify({"error": "No se pudo obtener información del usuario. Asegúrate de que el token es válido."}), 401
-
-    user_name = user_info.get("login")  # Nombre de usuario en GitHub
-
-    # Verifica si el usuario ya existe en la base de datos
-    user = User.query.filter_by(name=user_name).first()
-
-    if not user:
-        # Si no existe, crear un nuevo usuario
-        new_user = User(
-            id=str(uuid4()),  # Genera UUID
-            name=user_name,
-            userType="Federated",
-            status="Active",
-            roles=""
-        )
-        db.session.add(new_user)
-        db.session.commit()
-        user_id = new_user.id
-    else:
-        user_id = user.id
-
-    return jsonify({"message": "Inicio de sesion exitoso", "user_id": user_id})
 
 @app.errorhandler(Exception)
 def handle_exception(e):
-    # Registrar el error usando logging
-    logging.error(f"Error occurred: {str(e)}")
+    statsd.increment('flask.error_count',
+                    tags=['error_type:{}'.format(type(e).__name__),
+                          'service:my-api-service',
+                          'env:development'])
     return jsonify({"error": str(e)}), 500
 
 # Métricas Datadog

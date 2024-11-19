@@ -6,3 +6,11 @@ Flask-OAuthlib==0.9.6
 requests-oauthlib<1.2.0
 gunicorn==20.1.0
 datadog==0.43.0
+Authlib
+PyJWT==2.8.0
+authlib==1.2.1
+six==1.16.0
+cryptography>=42.0.2
+requests==2.31.0
+python-jose==3.3.0
+python-dotenv==1.0.0

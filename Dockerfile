@@ -3,6 +3,11 @@
 # FROM python:3.10-alpine
 FROM python:3.10-slim
 
+# Datadog config
+RUN DD_API_KEY=4ca9b95447eb0d7b3f9ae8a271816db9 \
+    DD_SITE="datadoghq.com" \
+    bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script.sh)"
+
 # Establecer el directorio de trabajo
 WORKDIR /app
 # WORKDIR /code
