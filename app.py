@@ -1,13 +1,16 @@
 from flask import Flask, request, jsonify, redirect, session, url_for
+from flask_restx import Api, Resource
 from requests_oauthlib import OAuth2Session
 from authlib.integrations.flask_client import OAuth
-from datadog import initialize, statsd
 from config import Config
 from models import db
 from models.user import User
 from models.role import Role
 from controllers.user_controller import user_bp
 from controllers.role_controller import role_bp
+from controllers.role_controller import role_api
+from controllers.user_controller import user_api
+from auth.auth_middleware import AuthError
 from uuid import uuid4
 import json
 import jwt
@@ -20,6 +23,18 @@ app.secret_key = Config.SECRET_KEY
 app.config.from_object(Config)
 # Inicializar DB
 db.init_app(app)
+
+api = Api(app,
+    version='1.0',
+    title='User Management API',
+    description='API para gestión de usuarios y roles',
+    doc='/swagger',
+    prefix='/api'
+)
+
+# Registrar namespaces
+api.add_namespace(role_api)
+api.add_namespace(user_api)
 
 def create_admin_user(app):
     with app.app_context():
@@ -62,17 +77,6 @@ with app.app_context():
     db.create_all()
     create_admin_user(app)
 
-# Inicializar integración Datadog
-options = {
-    'api_key': '4ca9b95447eb0d7b3f9ae8a271816db9',
-    'app_key': 'fc7802f55f214723b0f11b138463030788cfcd68',
-    'host': os.getenv('HOSTNAME', 'my-api-service'),
-    'statsd_host': 'dd-agent',
-    'statsd_port': 8125
-}
-
-initialize(**options)
-
 # Registrar los Blueprints para las rutas de usuario y rol
 app.register_blueprint(user_bp)
 app.register_blueprint(role_bp)
@@ -96,8 +100,9 @@ auth0 = oauth.register(
 @app.route('/')
 def home():
     return jsonify({
-        "message": "Probando API REST.",
-        "login_url": "/login"
+        "message": "Test API REST.",
+        "login_url": "/login",
+        "api_docs": "/swagger"
     })
 
 @app.route('/login')
@@ -143,19 +148,11 @@ def callback():
         db.session.rollback()
         return jsonify({"error": str(e)}), 400
 
-@app.errorhandler(Exception)
-def handle_exception(e):
-    statsd.increment('flask.error_count',
-                    tags=['error_type:{}'.format(type(e).__name__),
-                          'service:my-api-service',
-                          'env:development'])
-    return jsonify({"error": str(e)}), 500
-
-# Métricas Datadog
-statsd.increment('app.start')
-statsd.increment('app.page_views', tags=["page:home"])
-statsd.event('User Signup', 'A new user has signed up.', alert_type='success', tags=['user:signup'])
-statsd.increment('app.errors', tags=["error_type:validation"])
+@app.errorhandler(AuthError)
+def handle_auth_error(ex):
+    response = jsonify(ex.error)
+    response.status_code = ex.status_code
+    return response
 
 if __name__ == '__main__':
     app.run(debug=True)
